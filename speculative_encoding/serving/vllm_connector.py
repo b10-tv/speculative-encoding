@@ -14,6 +14,7 @@ from speculative_encoding import settings
 from speculative_encoding.encode import prefix_tokens
 import hashlib
 import threading
+import time
 import unicodedata
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable
@@ -251,6 +252,8 @@ except ImportError:  # older vLLM
 # Document tokens (after the header) hashed into the prefix index; registered prefixes shorter
 # than header + ANCHOR are indexed at their own length.
 ANCHOR = 32
+# Seconds the scheduler sleeps each time it asks for a prefix still being decoded.
+WAIT_SECONDS = 0.005
 
 
 def document_key(text: str) -> str:
@@ -501,6 +504,9 @@ class CrossModelKVConnector(TranslatedKVConnector):
         self.partial = bool(extra.get("partial", False)) and self.allow_partial_matches
         self.registry = REGISTRY
         self._matched: dict[str, tuple[str, int]] = {}  # request id -> (STORE name, tokens)
+        # Requests waiting for a background decode: their match, so the scheduler's repeated
+        # asks do not re-hash a long prompt each step.
+        self._waiting: dict[str, Match] = {}
 
     def get_num_new_matched_tokens(self, request, num_computed_tokens):
         params = request.kv_transfer_params or {}
@@ -508,7 +514,7 @@ class CrossModelKVConnector(TranslatedKVConnector):
             return super().get_num_new_matched_tokens(request, num_computed_tokens)
         self._matched.pop(request.request_id, None)
         prompt = request.prompt_token_ids or []
-        match = self.registry.match(
+        match = self._waiting.pop(request.request_id, None) or self.registry.match(
             self.target, prompt, key=params.get("xdoc"), partial=self.partial)
         if match is None or match.state == "none":
             return 0, False
@@ -527,7 +533,11 @@ class CrossModelKVConnector(TranslatedKVConnector):
         except Exception:  # the decode failed (kept in registry.errors): prefill natively
             return 0, False
         if name is None:
-            return None, False  # decoding: vLLM asks again next step
+            # Decoding: vLLM asks again next step. The scheduler loop is tight Python; yield
+            # the GIL so the decode thread can run (without this it starved: hours at 40k tokens).
+            self._waiting[request.request_id] = match
+            time.sleep(WAIT_SECONDS)
+            return None, False
         self._matched[request.request_id] = (name, tokens)
         return tokens - num_computed_tokens, False
 
