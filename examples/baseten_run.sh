@@ -5,7 +5,8 @@
 #   DOCUMENT      a text file in the repo to read (default: examples/sample_document.txt, a short contract)
 #   DOCUMENT_URL  or a text file to download instead, cut to DOCUMENT_CHARS characters
 #   QUESTION      the question (default: one about the sample)
-#   SOURCE, TARGET (default qwen3-14b -> llama31-8b); COMPRESSOR (default 128: also answer from a 128x cache; empty: off)
+#   SOURCE, TARGET (default qwen3-14b -> llama31-8b); COMPRESSOR=128 also answers from a 128x cache (for long
+#                 documents: the 2k-token sample would keep about 16 tokens)
 #   HF_TOKEN      read access to the gated catalog models (Llama, Gemma), from a Baseten secret
 set -euo pipefail
 
@@ -15,7 +16,7 @@ DOCUMENT=${DOCUMENT:-examples/sample_document.txt}
 DOCUMENT_CHARS=${DOCUMENT_CHARS:-60000}
 QUESTION=${QUESTION:-"Who signed the agreement for each party, and when does it end?"}
 OUT=${OUT:-/tmp/encoded}
-COMPRESSOR=${COMPRESSOR-128}
+COMPRESSOR=${COMPRESSOR:-}
 
 python -m pip install -q uv==0.12.1
 uv sync --frozen --extra vllm --extra fast

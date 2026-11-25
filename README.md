@@ -51,8 +51,7 @@ uv run python -m speculative_encoding.cli split path/to/translator ckpt/split
 
 `run_on_baseten.py` runs the whole pipeline on one Baseten GPU: it builds the environment
 from `uv.lock`, downloads the released checkpoint, encodes a document
-(`examples/sample_document.txt` by default) and answers a question with vLLM, from the full
-and the 128x compressed cache; the answers are in the job's logs. It needs a Baseten secret holding a
+(`examples/sample_document.txt` by default) and answers a question with vLLM; the answers are in the job's logs. It needs a Baseten secret holding a
 Hugging Face token with access to the gated models (Llama 3.1, Gemma):
 
 ```bash
@@ -60,7 +59,8 @@ HF_SECRET=<secret name> uvx truss train push run_on_baseten.py --job-name specul
 ```
 
 `SOURCE`, `TARGET`, `DOCUMENT`, `DOCUMENT_URL`, `QUESTION` and `COMPRESSOR` set at push time are
-passed to the job (`examples/baseten_run.sh`).
+passed to the job (`examples/baseten_run.sh`). `COMPRESSOR=128` also answers from a 128x
+cache; use it with a long document (`DOCUMENT_URL`), since 128x of the 2k-token sample is about 16 tokens.
 
 ## Command line
 
