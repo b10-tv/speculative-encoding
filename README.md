@@ -107,9 +107,14 @@ answers = answer_vllm("encoded/", max_model_len=40960)          # vLLM in a subp
   generated with, so a relay can capture the answer's rows from it
   (`handoff.capture_rows`, see `handoff`).
 - **What the compressor kept.** Compressed items carry `kept_positions` and
-  `kept_char_spans` in `meta`; `encode(..., return_scores=True)` adds the per-token
-  selection scores, `return_scores=k` the top `k`; `meta["timings"]` has the
-  selection, compression and cache-write seconds.
+  `kept_char_spans` (character spans into the string you passed) in `meta`;
+  `encode(..., return_scores=True)` adds the per-token selection scores and
+  `doc_char_spans` (one span per scored token, to paint the whole document),
+  `return_scores=k` the top `k`; `meta["timings"]` has the selection, compression and
+  cache-write seconds.
+- **Controls.** `enc.answer_hf(item, native=True)` answers with the target reading the
+  document itself (for a compressed item, the whole document): the baseline to show next to
+  the translated or compressed answer. `cli answer --native` does the same with vLLM.
 - **One source, many targets.** `MultiTargetEncoder.from_pretrained(ckpt, source,
   targets=[...])` loads the translator and source once, reads each document once and
   returns `{target: EncodedDocument}`. Questions are passed as text and rendered per

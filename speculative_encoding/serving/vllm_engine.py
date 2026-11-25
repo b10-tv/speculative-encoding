@@ -30,7 +30,9 @@ visible; use ``hf_engine.stream``.
 
 from __future__ import annotations
 
+
 import argparse
+import hashlib
 import gc
 import itertools
 import json
@@ -327,7 +329,10 @@ def answer_folder(
                     f"answer > max model length {max_model_len}", file=sys.stderr, flush=True)
                 skipped.append({"name": name, "key": meta.get("key"), "tokens": longest})
                 continue
-            native_salt = f"native:{meta['key']}" if meta.get("native_prefix_ids") else None
+            native_salt = None
+            if meta.get("native_prefix_ids"):  # one salt per document: its native prefix is cached once
+                document = meta.get("key") or hashlib.sha1(str(native_ids).encode()).hexdigest()[:16]
+                native_salt = f"native:{document}"
             answers = engine.answer(
                 torch.load(folder / f"{name}.pt"), meta["prefix_ids"], meta["questions"],
                 native=native and not meta.get("no_native"), name=name, native_ids=native_ids,

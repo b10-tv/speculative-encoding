@@ -311,14 +311,15 @@ def question_dict(question):
 
 
 def render_question(tokenizer, text: str, *, metric: str = "f1", row_id: str | None = None,
-                    max_tokens: int | None = None, sampling=None, target: str | None = None,
+                    max_tokens: int | None = None, sampling=None, model: str | None = None,
                     **row) -> Question:
     """``text`` as a question for ``tokenizer``'s chat template, sent as given (no MCQ
     scaffolding). ``metric="free"``: ungraded free-form. ``metric="nll"``: scores the
     reference ``answer`` (its mean NLL) instead of generating. ``sampling``
     (``Sampling`` or a dict) travels with the question; default greedy. ``row_id`` keys
-    compressed items (default: a digest of ``text``). ``target``: the model the tokenizer
-    belongs to (checked when the question is used)."""
+    compressed items as given (default: a digest of ``text``). ``model``: the model the
+    tokenizer belongs to (checked when the question is used); ``target`` / ``answer`` in
+    ``row`` are the reference text, as in ``chat_row``."""
 
     import hashlib
 
@@ -329,8 +330,8 @@ def render_question(tokenizer, text: str, *, metric: str = "f1", row_id: str | N
     chat = chat_row("api", row_id, "", question=text, metric=metric, **row)
     rendered = render(tokenizer, chat, include_document=False, target_text=reference)
     question = Question(
-        row_id=chat["id"], metric=metric, after_ids=list(rendered.after_ids),
-        max_tokens=generation_tokens(metric, max_tokens), text=text, target=target,
+        row_id=row_id, metric=metric, after_ids=list(rendered.after_ids),
+        max_tokens=generation_tokens(metric, max_tokens), text=text, target=model,
         answer=row.get("answer"), letters=row.get("letters"))
     if metric == "nll":  # one forward over the reference, no generation
         question.continuation_ids, question.max_tokens = list(rendered.continuation_ids), 0

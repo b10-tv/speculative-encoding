@@ -122,7 +122,7 @@ class Encoded:
                 "header_tokens": self.header_tokens, "doc_tokens": self.doc_tokens,
                 "prefix_bytes": self.bytes,
                 "max_tokens": max(limits) if limits else se_prompts.GENERATION_TOKENS["mcq"]}
-        if self.arm != "full":
+        if self.arm != "full" and not self.meta.get("native_prefix_ids"):
             meta["no_native"] = True
         (folder / f"{name}.json").write_text(json.dumps(meta))
         (folder / f"{name}.ready").touch()
@@ -315,7 +315,7 @@ class SpeculativeEncoder:
 
         return se_prompts.render_question(
             self.target_tokenizer, text, metric=metric, row_id=row_id, max_tokens=max_tokens,
-            sampling=sampling, target=self.target_key, **row)
+            sampling=sampling, model=self.target_key, **row)
 
     def _source_tokenizer(self):
         if self.source_tokenizer is None:  # load_source=False: the tokenizer alone is enough
@@ -415,7 +415,9 @@ class SpeculativeEncoder:
             sample = memory.sample(self.target_tokenizer, self.config,
                                    question=_first_question(questions))
             rows = None
-        return self._encode_sample(sample, rows, questions, ratios, memory, return_scores)
+        offset = 0 if document is None else len(document) - len(str(document).lstrip())
+        return self._encode_sample(sample, rows, questions, ratios, memory, return_scores,
+                                   char_offset=offset)
 
     @torch.no_grad()
     def encode_ids(self, ids, *, text: str | None = None, spans=None, questions=(), ratios=(),
@@ -473,7 +475,7 @@ class SpeculativeEncoder:
                              "pass a distinct row_id to question()")
 
     def _encode_sample(self, sample, source_rows, questions, ratios, memory,
-                       return_scores=False) -> EncodedDocument:
+                       return_scores=False, char_offset=0) -> EncodedDocument:
         header, device, target = list(sample.target.header_ids), self.device, self.target
         doc = se_prompts.document_tensors(sample, source_rows, self.reader, device)
         del source_rows
@@ -510,6 +512,10 @@ class SpeculativeEncoder:
             arm="full", prefix=E.prefix_to(full_prefix, "cpu"),
             prefix_ids=header + list(sample.target.doc_ids), questions=list(questions),
             meta=meta, **common))
+        # Character spans of the target document tokens, in the caller's string (the
+        # document is encoded stripped).
+        spans = [[int(a) + char_offset, int(b) + char_offset] for a, b in sample.target.doc_spans]
+        native_ids = header + list(sample.target.doc_ids)
         for question in questions:
             for ratio in map(float, ratios):
                 scores = {} if return_scores is not False else None
@@ -520,16 +526,18 @@ class SpeculativeEncoder:
                     scores_out=scores)
                 kept = slots.tolist()
                 # What the compressor kept: target document token indices and their
-                # character spans in the text.
+                # character spans in the text; the whole document's ids for the native control.
                 item_meta = {**meta, "slots": int(slots.numel()), "compressor_ratio": ratio,
                              "timings": timings,
                              "kept_positions": [int(i) for i in kept],
-                             "kept_char_spans": [list(sample.target.doc_spans[i]) for i in kept]}
+                             "kept_char_spans": [spans[i] for i in kept],
+                             "native_prefix_ids": native_ids}
                 if scores is not None:
                     pooled = scores["pooled"]
                     item_meta["selection_score"] = SELECTION_SCORE
                     if return_scores is True:
                         item_meta["selection_scores"] = pooled.tolist()
+                        item_meta["doc_char_spans"] = spans
                     else:
                         top = pooled.topk(min(int(return_scores), pooled.numel()))
                         item_meta["selection_top"] = {"positions": top.indices.tolist(),
@@ -543,8 +551,11 @@ class SpeculativeEncoder:
         settings.empty_cache(device)
         return result
 
-    def answer_hf(self, encoded: Encoded, questions=None, **kwargs) -> list[dict]:
-        """Answers from the Hugging Face engine in this process (no vLLM)."""
+    def answer_hf(self, encoded: Encoded, questions=None, *, native: bool = False,
+                  **kwargs) -> list[dict]:
+        """Answers from the Hugging Face engine in this process (no vLLM). ``native=True``:
+        the control, the target reading the document itself (a compressed item's whole
+        document) instead of the translated cache."""
 
         from speculative_encoding.serving import hf_engine
 
@@ -553,6 +564,10 @@ class SpeculativeEncoder:
                              f"{self.target_key}")
         questions = [se_prompts.question_dict(q) for q in (questions or encoded.questions)]
         self._check_questions(questions)
+        if native:
+            ids = encoded.meta.get("native_prefix_ids") or encoded.prefix_ids
+            return hf_engine.answer_batch(self.target, self.target_tokenizer, None, ids,
+                                          questions, **kwargs)
         prefix = E.prefix_to(encoded.prefix, self.device)
         return hf_engine.answer_batch(self.target, self.target_tokenizer, prefix,
                                       encoded.prefix_ids, questions, **kwargs)

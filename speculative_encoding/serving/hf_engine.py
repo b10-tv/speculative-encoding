@@ -435,16 +435,17 @@ def _events(
         interface, tokenizer, cache, tokens, question_ids, max_tokens, stops,
         sampling, top_logprobs, _rng(sampling, interface.device),
         keep_cache=keep_cache)
-    # One event behind, so the last one can carry the record (the generator's return value).
-    pending = next(events)
-    while True:
+    # Each token as soon as it is picked; the last one (finish_reason set) also carries the
+    # record, the generator's return value.
+    for event in events:
+        if event["finish_reason"] is None:
+            yield event
+            continue
         try:
-            following = next(events)
+            next(events)
         except StopIteration as stop:
-            yield {**pending, "result": stop.value}
-            return
-        yield pending
-        pending = following
+            yield {**event, "result": stop.value}
+        return
 
 
 def continue_turn(
