@@ -26,13 +26,14 @@ uv run python -m speculative_encoding.serving.transformers_compat --install
 uv run python -m speculative_encoding.serving.transformers_compat --check
 ```
 
-Qwen 3.5 (as source or target) also needs its linear-attention kernels; causal-conv1d has
-no Torch 2.11 wheel, so it builds against the installed Torch (needs `nvcc`):
+Qwen 3.5 (as source or target) also needs its linear-attention kernels (pure Triton):
 
 ```bash
 uv pip install einops fla-core==0.6.0 flash-linear-attention==0.6.0
-CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --no-build-isolation causal-conv1d==1.7.0
 ```
+
+Without `causal-conv1d`, Transformers runs Qwen 3.5's short convolution in PyTorch: correct, a
+little slower. It has no wheel for this Torch (CUDA 13); building it needs a CUDA 13 `nvcc`.
 
 The released checkpoint is
 [`RampPublic/speculative-encoding`](https://huggingface.co/RampPublic/speculative-encoding)

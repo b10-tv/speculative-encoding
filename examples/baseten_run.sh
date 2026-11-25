@@ -23,8 +23,7 @@ uv sync --frozen --extra vllm --extra fast
 uv run python -m speculative_encoding.serving.transformers_compat --install
 uv run python -m speculative_encoding.serving.transformers_compat --check
 case "$SOURCE,$TARGET" in *qwen35*)  # Qwen 3.5's linear-attention kernels (README)
-  uv pip install einops fla-core==0.6.0 flash-linear-attention==0.6.0 setuptools wheel ninja
-  CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --no-build-isolation causal-conv1d==1.7.0 ;;
+  uv pip install einops fla-core==0.6.0 flash-linear-attention==0.6.0 ;;
 esac
 
 if [[ -n ${DOCUMENT_URL:-} ]]; then

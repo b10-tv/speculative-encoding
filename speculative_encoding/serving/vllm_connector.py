@@ -466,8 +466,9 @@ REGISTRY = CrossModelRegistry()
 def add_document_for_targets(
     text: str, tokenizers: dict, *, registry: CrossModelRegistry | None = None,
     role: str = "system") -> str:
-    """Register ``text`` and, for each ``{target: tokenizer}``, the header + document ids a
-    request for that target starts with: ``prompts.render`` of the same chat row
+    """Register ``text`` and, for each ``{target: tokenizer}`` (Hugging Face tokenizers,
+    ``models.load_tokenizer``; not ``LLM.get_tokenizer()``, which is vLLM's own for Mistral
+    models), the header + document ids a request for that target starts with: ``prompts.render`` of the same chat row
     ``SpeculativeEncoder`` encodes (the question only shapes ``after_ids``). Returns the key."""
 
     from speculative_encoding import prompts
