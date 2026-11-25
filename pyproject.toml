@@ -1,0 +1,33 @@
+[project]
+name = "speculative-encoding"
+version = "0.0.0"
+description = "Translate one LLM's document states into another LLM's KV cache, with optional query-aware compression, served through vLLM"
+readme = "README.md"
+requires-python = ">=3.11"
+# One environment for the translator and vLLM: vLLM 0.24's Torch, the translator's transformers
+# (serving/transformers_compat.py bridges the two). numpy < 2.4: mistral-common (vLLM) caps it.
+dependencies = [
+    "huggingface-hub==1.33.0",
+    "numpy==2.3.5",
+    "torch==2.11.0",
+    "transformers==5.23.0",
+]
+
+[project.optional-dependencies]
+# GPU fast path (tiled window attention / fused MoE kernels).
+fast = ["triton==3.6.0; sys_platform == 'linux'"]
+# Serving with vLLM (Linux, CUDA).
+vllm = ["vllm==0.24.0; sys_platform == 'linux'"]
+
+[tool.uv]
+# Run from the checkout (uv run python -m speculative_encoding.cli ...); not installed as a package.
+package = false
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["speculative_encoding*"]
+exclude = ["parity*"]

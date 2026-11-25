@@ -1,0 +1,54 @@
+HARBORVIEW MUNICIPAL WATER AUTHORITY
+Pump Station Maintenance Agreement No. HV-2291
+
+This agreement is entered into on 14 March 2024 between the Harborview Municipal Water Authority ("the Authority"), with offices at 12 Quay Street, Harborview, and Calder & Wynn Mechanical Services Ltd ("the Contractor"), registered at Unit 4, Fenwick Industrial Park.
+
+1. Purpose
+
+The Authority operates three pump stations that lift treated water from the Ostrander reservoir to the hill district: North Ridge (station A), Mill Lane (station B) and Pelham Heights (station C). The Contractor will inspect, service and repair the pumps, motors, valves and control panels at all three stations so that each station remains available for at least 98.5 percent of the hours in every calendar quarter.
+
+2. Term
+
+The agreement starts on 1 April 2024 and runs for three years, ending on 31 March 2027. The Authority may extend it once, for a further two years, by giving written notice no later than 31 December 2026. Either party may end the agreement early with 120 days' written notice; if the Authority ends it early without cause, it pays the Contractor a termination fee equal to two months of the base fee.
+
+3. Scope of work
+
+3.1 Routine maintenance. The Contractor will visit each station once a month. Each visit includes checking bearing temperatures and vibration on every pump, testing the motor insulation, exercising every isolation valve, cleaning the intake screens and downloading the controller logs. Station C, which houses the oldest equipment, receives an additional visit in the middle of each month from June to September, when demand is highest.
+
+3.2 Annual overhaul. Once a year, between 1 November and 28 February, the Contractor will take each pump out of service in turn, replace its mechanical seals and wear rings, and realign it with its motor. No more than one pump per station may be out of service at the same time, and an overhaul at station C may not begin until the overhaul at station A is complete.
+
+3.3 Emergency response. The Contractor will keep a technician on call at all hours. For a failure that stops a station from pumping, a technician must arrive on site within 90 minutes of the Authority's call. For any other fault, the response time is the next working day.
+
+4. Fees
+
+4.1 The base fee is 18,400 per month for all three stations, paid within 30 days of each monthly invoice. The base fee covers routine maintenance, the annual overhaul and the first 40 hours of emergency work in each quarter.
+
+4.2 Emergency work beyond 40 hours in a quarter is charged at 165 per hour on weekdays and 240 per hour at night, at weekends and on public holidays. Parts are charged at cost plus 8 percent; any single part costing more than 6,000 needs the Authority's written approval before it is ordered.
+
+4.3 The base fee rises on 1 April 2025 and on 1 April 2026 by the change in the regional consumer price index over the previous twelve months, capped at 4 percent per year.
+
+5. Performance credits
+
+If a station's availability falls below 98.5 percent in a quarter, the Authority deducts a credit from the next invoice: 2 percent of the quarterly base fee for each full percentage point below the target, for each station that misses it, up to a maximum of 15 percent of the quarterly base fee. Outages caused by power failures on the public grid, by flooding above the station floor level, or by work the Authority itself requested are not counted against availability.
+
+6. Spare parts
+
+The Contractor will keep, at its own depot, one complete spare motor for the pumps at stations A and B (which use the same model) and one spare impeller and seal kit for every pump at station C. Spare parts remain the property of the Authority, which paid for them under the previous agreement, and must be returned to it when this agreement ends.
+
+7. Safety and access
+
+Technicians must hold a confined-space entry certificate and must sign in with the Authority's control room on arrival and departure. The Authority will provide keys and alarm codes for all three stations; the Contractor will report any lost key within 24 hours, and pays for the locks at that station to be changed.
+
+8. Insurance
+
+The Contractor will hold public liability insurance of at least 5,000,000 per claim and will send the Authority a copy of the certificate every year by 1 April.
+
+9. Disputes
+
+The parties will first try to settle a dispute through a meeting between the Authority's Head of Operations and the Contractor's Managing Director within 14 days of either party raising it. If that fails, the dispute goes to a single arbitrator agreed by both parties or, failing agreement, appointed by the regional chamber of engineers.
+
+10. Signatures
+
+Signed for the Harborview Municipal Water Authority by Ingrid Solberg, Head of Operations.
+Signed for Calder & Wynn Mechanical Services Ltd by Tomasz Wierzbicki, Managing Director.
+Witnessed by Amara Okafor, Authority Legal Counsel.
