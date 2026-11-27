@@ -102,8 +102,25 @@ class TranslatedKVConnector(KVConnectorBase_V1):
                 scheduled = scheduler_output.num_scheduled_tokens[request.req_id]
                 assert scheduled == tokens, "capture needs a one-step prefill"
                 meta.captures.append((name, tokens, block_ids))
-        assert not self._pending, f"injected requests not scheduled as new: {list(self._pending)}"
+        self._resumed_loads(scheduler_output, meta)
+        assert not self._pending, f"injected requests not scheduled: {list(self._pending)}"
         return meta
+
+    def _resumed_loads(self, scheduler_output, meta):
+        """Loads for preempted requests resumed this step. vLLM <= 0.24 (V1 model runner)
+        lists them in ``scheduled_cached_reqs`` with their whole block table in
+        ``new_block_ids``; their blocks were freed, so the prefix is injected again. Newer vLLM
+        re-sends them as new requests (handled above)."""
+
+        cached = scheduler_output.scheduled_cached_reqs
+        resumed = getattr(cached, "resumed_req_ids", None) or ()
+        for index, req_id in enumerate(cached.req_ids):
+            if req_id not in resumed or req_id not in self._pending:
+                continue
+            params = self._pending.pop(req_id)
+            block_ids = tuple(list(ids) for ids in cached.new_block_ids[index])
+            start = int(params.get("start", 0))
+            meta.loads.append((params["inject"], start, int(params["tokens"]), block_ids))
 
     # Worker side.
     def register_kv_caches(self, kv_caches):
