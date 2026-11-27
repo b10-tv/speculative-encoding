@@ -732,6 +732,22 @@ _PINNED_SCHEMAS = {
 }
 
 
+def _compatible(name: str) -> bool:
+    """Whether Torch's current schema of ``name`` still accepts the pinned call: the pinned
+    arguments and returns unchanged, any new arguments optional (Torch 2.14 appends
+    ``block_table`` / ``num_splits`` to ``_flash_attention_forward``)."""
+
+    # torch._C.parse_schema is private, but it is how Torch itself turns schema strings into
+    # FunctionSchema objects, the type the live op exposes as ``_schema``.
+    pinned = torch._C.parse_schema(_PINNED_SCHEMAS[name])
+    current = getattr(torch.ops.aten, name).default._schema
+    old, new = pinned.arguments, current.arguments
+    same = [str(a.type) == str(b.type) and a.name == b.name for a, b in zip(old, new)]
+    extra_optional = all(arg.has_default_value() for arg in new[len(old):])
+    returns = [str(r.type) for r in pinned.returns] == [str(r.type) for r in current.returns]
+    return len(new) >= len(old) and all(same) and extra_optional and returns
+
+
 def install(enabled: int = 1) -> None:
     """Set the no-grad executor level for every translator forward in this process (0: eager)."""
 
@@ -745,11 +761,8 @@ def install(enabled: int = 1) -> None:
         torch.__version__.split("+")[0] != "2.7.0"
     ):
         # The paper ran Torch 2.7.0; another Torch works if the private attention ops it
-        # calls keep 2.7's schemas (2.11 does).
-        changed = [
-            name for name, schema in _PINNED_SCHEMAS.items()
-            if str(getattr(torch.ops.aten, name).default._schema) != schema
-        ]
+        # calls still accept 2.7's calls (2.11 keeps the schemas; 2.14 adds optional ones).
+        changed = [name for name in _PINNED_SCHEMAS if not _compatible(name)]
         if changed:
             raise RuntimeError(
                 f"Torch {torch.__version__}: private attention op schemas differ from "

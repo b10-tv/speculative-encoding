@@ -72,7 +72,11 @@ class TranslatedKVConnector(KVConnectorBase_V1):
         self._group, self._group_block_size = {}, {}
         groups = getattr(kv_cache_config, "kv_cache_groups", None) or []
         for group_index, group in enumerate(groups):
-            self._group_block_size[group_index] = int(group.kv_cache_spec.block_size)
+            # vLLM <= 0.24: one kv_cache_spec per group; newer: the group's own block_size.
+            block_size = getattr(group, "block_size", None)
+            if block_size is None:
+                block_size = group.kv_cache_spec.block_size
+            self._group_block_size[group_index] = int(block_size)
             for name in group.layer_names:
                 self._group[_layer(name)] = group_index
 
@@ -114,16 +118,20 @@ class TranslatedKVConnector(KVConnectorBase_V1):
         for name, cache in kv_caches.items():
             layer = _layer(name)
             self._layer_names[layer] = name
-            if isinstance(cache, (list, tuple)):  # gated-delta: [conv state, recurrent state]
-                self._caches[layer] = list(cache)
+            if isinstance(cache, (list, tuple)) or self._is_state_layer(name):
+                # Gated-delta: [conv state, recurrent state, ...] (_states). Newer vLLM registers
+                # the layer's raw state pages and binds the per-state views to the layer.
+                self._caches[layer] = list(cache) if isinstance(cache, (list, tuple)) else None
                 continue
-            # vLLM's [blocks, 2, block_size, kv_heads, head_dim]. Writes go through the attention
-            # backend (_write_kv), reads for parity through _read_kv. Dimension 2 is the kernel
-            # block size: the hybrid allocator may split each of its blocks into kernel blocks.
+            # vLLM <= 0.24 [blocks, 2, block_size, kv_heads, head_dim]; newer vLLM a logical
+            # [blocks, kv_heads, block_size, 2 * head_dim] view (KVCacheLayout). Writes go through
+            # the attention backend (_write_kv), reads for parity through _read_kv. Dimension 2
+            # is the kernel block size in both: the hybrid allocator may split each of its blocks
+            # into kernel blocks.
             group = self._group.get(layer, 0)
             block_size = self._group_block_size.get(group, self._block_size)
             shape = (name, tuple(cache.shape), block_size)
-            assert cache.ndim == 5 and cache.shape[1] == 2, shape
+            assert cache.ndim in (4, 5), shape
             assert block_size % cache.shape[2] == 0, shape
             impl = self._static[name].impl
             update = getattr(impl, "do_kv_cache_update", None)
@@ -133,6 +141,19 @@ class TranslatedKVConnector(KVConnectorBase_V1):
                     f"do_kv_cache_update(layer, key, value, kv_cache, slot_mapping); "
                     f"{type(impl).__name__} has none (MLA backends are not supported)")
             self._caches[layer] = cache
+
+    def _is_state_layer(self, name):
+        return isinstance(getattr(self._static.get(name), "kv_cache", None), (list, tuple))
+
+    def _states(self, layer):
+        """A gated-delta layer's conv and recurrent state views, as the layer itself reads
+        them."""
+
+        states = self._caches[layer]
+        name = self._layer_names[layer]
+        if self._is_state_layer(name):
+            states = self._static[name].kv_cache
+        return states[0], states[1]
 
     def _write_kv(self, layer, kv, slots):
         """Write ``kv`` [2, tokens, kv_heads, head_dim] to cache ``slots`` (kernel block *
@@ -153,7 +174,10 @@ class TranslatedKVConnector(KVConnectorBase_V1):
     def _read_kv(cache, blocks, offsets):
         """K/V ``[2, tokens, kv_heads, head_dim]`` at (kernel block, offset) pairs."""
 
-        return cache[blocks, :, offsets].transpose(0, 1)
+        if cache.ndim == 5 and cache.shape[1] == 2:  # [blocks, 2, block_size, heads, dim]
+            return cache[blocks, :, offsets].transpose(0, 1)
+        rows = cache[blocks, :, offsets]  # [blocks, heads, block_size, 2 * dim] -> [T, H, 2D]
+        return torch.stack(rows.chunk(2, dim=-1))
 
     def _slots(self, layer, block_ids, first, stop, device):
         """Token positions ``[first, stop)`` held in real blocks of ``layer``'s group (a
@@ -223,7 +247,7 @@ class TranslatedKVConnector(KVConnectorBase_V1):
                     # One state block per request (no prefix caching for gated-delta targets).
                     # vLLM keeps the last kernel - 1 conv inputs as (dim, state) or (state, dim)
                     # and the recurrent state as [v_heads, v_dim, k_dim].
-                    conv, ssm = cache
+                    conv, ssm = self._states(layer)
                     block = block_ids[self._group[layer]][0]
                     state = prefix["conv"][layer].to(device)  # HF: [conv_dim, kernel]
                     if conv.shape[1] == state.shape[0]:
@@ -252,7 +276,7 @@ class TranslatedKVConnector(KVConnectorBase_V1):
                     out["kv"][layer] = self._read_kv(cache, blocks, offsets).clone()
                     out["kv_first"][layer] = int(positions[0])
                     continue
-                conv, ssm = cache
+                conv, ssm = self._states(layer)
                 block = block_ids[self._group[layer]][0]
                 state = conv[block]  # HF orientation: [conv_dim, kernel - 1]
                 state = state if state.shape[0] > state.shape[1] else state.transpose(0, 1)

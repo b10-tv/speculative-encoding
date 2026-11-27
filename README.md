@@ -35,6 +35,19 @@ uv pip install einops fla-core==0.6.0 flash-linear-attention==0.6.0
 Without `causal-conv1d`, Transformers runs Qwen 3.5's short convolution in PyTorch: correct, a
 little slower. It has no wheel for this Torch (CUDA 13); building it needs a CUDA 13 `nvcc`.
 
+vLLM main also works (tested at `361f362033`, nightly 0.34.1rc1, Torch 2.14, with Qwen 3, Qwen 3.5
+and Gemma 3 targets), without the transformers patch (its transformers range includes 5.23):
+
+```bash
+git -C <vllm checkout> checkout 361f362033
+uv venv && VLLM_USE_PRECOMPILED=1 uv pip install -e <vllm checkout> --torch-backend=auto
+uv pip install transformers==5.23.0 einops fla-core==0.6.0 flash-linear-attention==0.6.0
+uv pip install -e . --no-deps
+```
+
+Then run the commands below with `uv run --no-sync` (a plain `uv run` syncs back to the 0.24
+lock).
+
 The released checkpoint is
 [`RampPublic/speculative-encoding`](https://huggingface.co/RampPublic/speculative-encoding)
 on the Hugging Face Hub: the translator (`translator/`, all seven models) and the 128x
