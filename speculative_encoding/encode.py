@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import contextvars
 from dataclasses import dataclass, field
+import ctypes
+import threading
+
 import torch
 from speculative_encoding.translator.hf import ModelInterface, _base_attention, copy_cache
 import copy
@@ -392,6 +395,109 @@ def prefix_to(prefix, device, non_blocking=False):
         return value.to(device, non_blocking=non_blocking) if torch.is_tensor(value) else value
 
     return {key: {index: move(value) for index, value in part.items()}
+            if isinstance(part, dict) else part for key, part in prefix.items()}
+
+
+_COPY = {}  # CUDA device -> (side stream, two pinned staging buffers, lock)
+_COPY_LOCK = threading.Lock()
+_STAGING_BYTES = 64 << 20
+_THREADED_COPY_BYTES = 8 << 20
+
+
+def _copier(device):
+    with _COPY_LOCK:
+        if device not in _COPY:
+            buffers = [torch.empty(_STAGING_BYTES, dtype=torch.uint8, pin_memory=True)
+                       for _ in range(2)]
+            _COPY[device] = torch.cuda.Stream(device), buffers, threading.Lock()
+        return _COPY[device]
+
+
+def _to_cpu_staged(values, stream, buffers):
+    """CUDA tensors ``values`` copied into new pageable CPU tensors through the pinned staging
+    ``buffers``, packed back to back: the device fills one buffer while the host empties the
+    other. The host copies large pieces with torch (threaded: first touches of new pages are
+    the slow part) and small ones with a plain memmove (torch's threaded copy costs a few
+    milliseconds per call)."""
+
+    outs = [torch.empty(value.shape, dtype=value.dtype) for value in values]
+    pending, slots, turn, used = [], [], 0, 0
+
+    def drain():
+        event, copies = pending.pop(0)
+        event.synchronize()
+        for dst, src in copies:
+            if dst.numel() >= _THREADED_COPY_BYTES:
+                dst.copy_(src)
+            else:
+                ctypes.memmove(dst.data_ptr(), src.data_ptr(), dst.numel())
+
+    def flush():
+        nonlocal slots, turn, used
+        if slots:
+            event = torch.cuda.Event()
+            event.record(stream)
+            pending.append((event, slots))
+            slots, turn, used = [], turn + 1, 0
+            if len(pending) == len(buffers):
+                drain()  # the next buffer must be empty before it is filled again
+
+    for value, out in zip(values, outs):
+        with torch.cuda.stream(stream):
+            src = value.contiguous().view(-1).view(torch.uint8)
+        dst = out.view(-1).view(torch.uint8)
+        start = 0
+        while start < src.numel():
+            buffer = buffers[turn % len(buffers)]
+            length = min(src.numel() - start, buffer.numel() - used)
+            with torch.cuda.stream(stream):
+                buffer[used:used + length].copy_(src[start:start + length], non_blocking=True)
+            slots.append((dst[start:start + length], buffer[used:used + length]))
+            start, used = start + length, used + length
+            if used == buffer.numel():
+                flush()
+    flush()
+    while pending:
+        drain()
+    return outs
+
+
+def prefix_offload(prefix, *, pinned=False):
+    """``prefix`` (tensor or ``HybridWriter`` dict) copied to CPU memory on a side stream, after
+    the current stream's work. Pageable by default, through two fixed 64 MiB pinned staging
+    buffers (about the pinned copy's speed, without pinning the prefix); ``pinned=True``:
+    straight into pinned memory, which the vLLM connector uploads asynchronously, but which
+    torch's host allocator rounds up to a power of two and keeps cached. The host waits only
+    for the side stream. CPU prefixes come back as they are; other devices (MPS) use
+    ``prefix_to``."""
+
+    tensors = [prefix] if torch.is_tensor(prefix) else [
+        value for part in prefix.values() if isinstance(part, dict)
+        for value in part.values() if torch.is_tensor(value)]
+    devices = {tensor.device for tensor in tensors if tensor.device.type != "cpu"}
+    if not devices:
+        return prefix
+    if any(device.type != "cuda" for device in devices) or len(devices) > 1:
+        return prefix_to(prefix, "cpu")
+    (device,) = devices
+    stream, buffers, lock = _copier(device)
+
+    def pin(value):
+        host = torch.empty(value.shape, dtype=value.dtype, pin_memory=True)
+        with torch.cuda.stream(stream):
+            host.copy_(value, non_blocking=True)
+        return host
+
+    with lock:
+        stream.wait_stream(torch.cuda.current_stream(device))
+        copied = iter([pin(value) for value in tensors] if pinned
+                      else _to_cpu_staged(tensors, stream, buffers))
+        stream.synchronize()
+    if torch.is_tensor(prefix):
+        return next(copied)
+    # the same walk as ``tensors`` above, so the copies line up
+    return {key: {index: next(copied) if torch.is_tensor(value) else value
+                  for index, value in part.items()}
             if isinstance(part, dict) else part for key, part in prefix.items()}
 
 

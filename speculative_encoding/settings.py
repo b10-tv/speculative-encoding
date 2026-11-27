@@ -24,6 +24,15 @@ import torch
 # ``glue_tune`` are read once, when ``translator.fast_inference`` is imported. ``HF_TOKEN``
 # is read as Hugging Face reads it.
 
+PREFIX_DEVICES = ("cpu", "pinned", "device")
+
+
+def _choice(name, value, choices):
+    if value not in choices:
+        raise ValueError(f"{name} must be one of {choices}, not {value!r}")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     # Fast path (levels >= 5): tiled window attention instead of FlashAttention-2 with one
@@ -46,6 +55,12 @@ class Settings:
     cache_tolerance: float = 2e-2  # UT_BF16_CACHE_TOLERANCE
     # vLLM connector with tensor parallelism > 1: folder the workers load each prefix from.
     vllm_export_dir: str | None = None  # PMT_VLLM_EXPORT_DIR
+    # SpeculativeEncoder.encode: where served prefixes end up (encode.prefix_offload).
+    # "cpu": pageable CPU memory, copied through two small pinned staging buffers; "pinned":
+    # pinned CPU memory (the vLLM connector uploads it asynchronously; torch keeps freed
+    # pinned blocks cached); "device": left on the encoder's device, outside vLLM's
+    # gpu_memory_utilization budget (no copy; the connector reads it there).
+    prefix_device: str = "cpu"  # PMT_PREFIX_DEVICE
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":
@@ -59,6 +74,8 @@ class Settings:
             gdn_full_module=env.get("PMT_GDN_FULL_MODULE") == "1",
             cache_tolerance=float(env.get("UT_BF16_CACHE_TOLERANCE", "2e-2")),
             vllm_export_dir=env.get("PMT_VLLM_EXPORT_DIR"),
+            prefix_device=_choice("PMT_PREFIX_DEVICE", env.get("PMT_PREFIX_DEVICE", "cpu"),
+                                  PREFIX_DEVICES),
         )
 
 
