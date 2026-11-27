@@ -127,9 +127,9 @@ class VLLMEngine:
             tensor_parallel_size=tensor_parallel_size, **llm_overrides))
         self.tokenizer = self.llm.get_tokenizer()
         # Without prefix caching (gated-delta targets) every question holds its whole document in
-        # the KV cache. More long requests at once than the cache holds made vLLM preempt one, and
-        # a resumed request never ran its injection (Qwen3.5 at 128k on H200). Such targets
-        # answer at most ``capacity // prompt`` questions at a time.
+        # the KV cache. More long requests at once than the cache holds make vLLM preempt one; the
+        # connector injects a resumed request again, but each preemption repeats that copy. Such
+        # targets answer at most ``capacity // prompt`` questions at a time.
         self.capacity = None
         try:
             cache = self.llm.llm_engine.vllm_config.cache_config
