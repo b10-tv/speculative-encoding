@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,6 +65,9 @@ class TranslatedKVConnector(KVConnectorBase_V1):
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         self._block_size = vllm_config.cache_config.block_size
         self._pending, self._captures, self._caches = {}, {}, {}
+        # Attention layers by layer index: their backend writes injected K/V (_write_kv).
+        self._static = vllm_config.compilation_config.static_forward_context
+        self._layer_names = {}
         # Layer -> KV cache group and each group's block size (one group unless hybrid).
         self._group, self._group_block_size = {}, {}
         groups = getattr(kv_cache_config, "kv_cache_groups", None) or []
@@ -108,23 +112,53 @@ class TranslatedKVConnector(KVConnectorBase_V1):
     # Worker side.
     def register_kv_caches(self, kv_caches):
         for name, cache in kv_caches.items():
+            layer = _layer(name)
+            self._layer_names[layer] = name
             if isinstance(cache, (list, tuple)):  # gated-delta: [conv state, recurrent state]
-                self._caches[_layer(name)] = list(cache)
+                self._caches[layer] = list(cache)
                 continue
-            # FlashAttention / FlashInfer / Triton layout: [blocks, 2 (K, V), block_size, kv_heads,
-            # head_dim]. The hybrid allocator may split each of its blocks into kernel blocks.
-            group = self._group.get(_layer(name), 0)
+            # vLLM's [blocks, 2, block_size, kv_heads, head_dim]. Writes go through the attention
+            # backend (_write_kv), reads for parity through _read_kv. Dimension 2 is the kernel
+            # block size: the hybrid allocator may split each of its blocks into kernel blocks.
+            group = self._group.get(layer, 0)
             block_size = self._group_block_size.get(group, self._block_size)
             shape = (name, tuple(cache.shape), block_size)
             assert cache.ndim == 5 and cache.shape[1] == 2, shape
             assert block_size % cache.shape[2] == 0, shape
-            assert self._group or cache.shape[2] == block_size, shape
-            self._caches[_layer(name)] = cache
+            impl = self._static[name].impl
+            update = getattr(impl, "do_kv_cache_update", None)
+            if update is None or list(inspect.signature(update).parameters)[:2] != ["layer", "key"]:
+                raise NotImplementedError(
+                    f"{name}: injecting K/V needs an attention backend with "
+                    f"do_kv_cache_update(layer, key, value, kv_cache, slot_mapping); "
+                    f"{type(impl).__name__} has none (MLA backends are not supported)")
+            self._caches[layer] = cache
+
+    def _write_kv(self, layer, kv, slots):
+        """Write ``kv`` [2, tokens, kv_heads, head_dim] to cache ``slots`` (kernel block *
+        kernel block size + offset) with the attention backend's own cache writer: any KV
+        cache layout, and FP8 caches quantized with the layer's k/v scales."""
+
+        name = self._layer_names[layer]
+        attention = self._static[name]
+        expected = (attention.num_kv_heads, attention.head_size)
+        if tuple(kv.shape[2:]) != expected:
+            raise ValueError(f"{name}: K/V of {tuple(kv.shape[2:])} heads x head_dim, the layer "
+                             f"holds {expected}")
+        dtype = self._vllm_config.model_config.dtype
+        keys, values = (part.to(dtype).contiguous() for part in kv)
+        attention.impl.do_kv_cache_update(attention, keys, values, self._caches[layer], slots)
+
+    @staticmethod
+    def _read_kv(cache, blocks, offsets):
+        """K/V ``[2, tokens, kv_heads, head_dim]`` at (kernel block, offset) pairs."""
+
+        return cache[blocks, :, offsets].transpose(0, 1)
 
     def _slots(self, layer, block_ids, first, stop, device):
         """Token positions ``[first, stop)`` held in real blocks of ``layer``'s group (a
-        sliding-window group's blocks before the window are vLLM's null block 0) and their
-        (kernel block, offset) in its cache."""
+        sliding-window group's blocks before the window are vLLM's null block 0), their
+        (kernel block, offset) in its cache and their cache slots."""
 
         group = self._group.get(layer, 0)
         size = self._group_block_size.get(group, self._block_size)
@@ -134,7 +168,8 @@ class TranslatedKVConnector(KVConnectorBase_V1):
         real = blocks != 0
         positions, blocks = positions[real], blocks[real]
         kernel_blocks = blocks * (size // kernel) + (positions % size) // kernel
-        return positions, kernel_blocks, positions % kernel
+        offsets = positions % kernel
+        return positions, kernel_blocks, offsets, kernel_blocks * kernel + offsets
 
     def start_load_kv(self, forward_context, **kwargs):
         tensors = [cache for cache in self._caches.values() if torch.is_tensor(cache)]
@@ -154,30 +189,36 @@ class TranslatedKVConnector(KVConnectorBase_V1):
                         "setting (environment variable PMT_VLLM_EXPORT_DIR) is unset")
                 prefix = torch.load(Path(export_dir) / f"{name}.pt")
                 heads = prefix.shape[3] // size
-                assert heads == tensors[0].shape[3], (tuple(prefix.shape), size, tensors[0].shape)
                 STORE.clear()  # one row at a time per worker
                 own = prefix[:, :, :, rank * heads : (rank + 1) * heads]
                 STORE[name] = own.contiguous().to(device)
             prefix = STORE[name]  # on the GPU, or on the CPU (copied one layer at a time)
+            slots_by_key = {}
+
+            def slots_for(layer, first):
+                """Positions and slots of [first, tokens) in layer's group, once per group."""
+
+                key = (self._group.get(layer, 0), self._caches[layer].shape[2], first)
+                if key not in slots_by_key:
+                    positions, _, _, slots = self._slots(layer, block_ids, first, tokens, device)
+                    slots_by_key[key] = positions, slots, len(positions) == tokens - first
+                return slots_by_key[key]
+
             if torch.is_tensor(prefix):
-                positions = torch.arange(start, tokens)
-                ids = torch.tensor(block_ids[0])
-                slots = ids[positions // self._block_size] * self._block_size
-                slots = (slots + positions % self._block_size).to(device)
-                blocks, offsets = slots // self._block_size, slots % self._block_size
-                for layer, cache in self._caches.items():
+                for layer in self._caches:
+                    positions, slots, whole = slots_for(layer, start)
                     kv = prefix[layer, :, start:tokens].to(device, non_blocking=True)
-                    cache[blocks, :, offsets] = kv.transpose(0, 1)
+                    self._write_kv(layer, kv if whole else kv[:, positions - start], slots)
                 continue
             assert prefix["tokens"] == tokens, (name, prefix["tokens"], tokens)
             for layer, cache in self._caches.items():
                 if layer in prefix["kv"]:
-                    first = prefix["kv_first"][layer]
-                    positions, blocks, offsets = self._slots(
-                        layer, block_ids, max(start, first), tokens, device)
+                    held = prefix["kv_first"][layer]
+                    first = max(start, held)
+                    positions, slots, whole = slots_for(layer, first)
                     kv = prefix["kv"][layer].to(device, non_blocking=True)
-                    kv = kv[:, positions - first].transpose(0, 1)
-                    cache[blocks, :, offsets] = kv.to(cache.dtype)
+                    kv = kv[:, first - held:] if whole else kv[:, positions - held]
+                    self._write_kv(layer, kv, slots)
                 elif layer in prefix["ssm"]:
                     # One state block per request (no prefix caching for gated-delta targets).
                     # vLLM keeps the last kernel - 1 conv inputs as (dim, state) or (state, dim)
@@ -206,9 +247,9 @@ class TranslatedKVConnector(KVConnectorBase_V1):
             out = {"tokens": tokens, "kv": {}, "kv_first": {}, "conv": {}, "ssm": {}}
             for layer, cache in self._caches.items():
                 if torch.is_tensor(cache):
-                    positions, blocks, offsets = self._slots(
+                    positions, blocks, offsets, _ = self._slots(
                         layer, block_ids, 0, tokens, cache.device)
-                    out["kv"][layer] = cache[blocks, :, offsets].transpose(0, 1).clone()
+                    out["kv"][layer] = self._read_kv(cache, blocks, offsets).clone()
                     out["kv_first"][layer] = int(positions[0])
                     continue
                 conv, ssm = cache
