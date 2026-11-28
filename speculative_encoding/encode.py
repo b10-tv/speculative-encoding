@@ -239,6 +239,16 @@ class HybridWriter:
                          if kind != "linear")
         self._apply = sys.modules[type(attention).__module__].apply_rotary_pos_emb
         self._apply_pair = "k" in inspect.signature(self._apply).parameters
+        linear = next((self.modules[index] for index, kind in self.kinds.items()
+                       if kind == "linear"), None)
+        names = inspect.signature(linear.forward).parameters if linear is not None else {}
+        self._linear_cache_name = "cache" if "cache" in names else "cache_params"
+
+    def linear_kwargs(self, cache):
+        """Keyword arguments a decoder layer passes its gated-delta module (the cache under
+        this transformers release's name; no padding mask)."""
+
+        return {self._linear_cache_name: cache, "attention_mask": None}
 
     def _layer_kv(self, index, x, positions):
         """Post-RoPE K and V ``[tokens, kv_heads, head_dim]`` of one attention layer from
@@ -264,6 +274,67 @@ class HybridWriter:
         else:  # Gemma 4: one tensor, [B, T, heads, D]
             keys = self._apply(keys, cos, sin, unsqueeze_dim=2)
         return keys[0], values[0]
+
+
+# Families whose ``HybridWriter`` output is checked bitwise against ``write_prefix`` +
+# ``prefix_from_cache`` (``write_prefix_fast``); other targets keep ``write_prefix``.
+FAST_WRITER_MODEL_TYPES = ("qwen3", "qwen3_5", "qwen3_5_text", "gemma3", "gemma3_text")
+
+
+def fast_writer_supported(interface) -> bool:
+    model_type = getattr(interface.config, "model_type", None)
+    return model_type in FAST_WRITER_MODEL_TYPES
+
+
+@torch.no_grad()
+def write_prefix_fast(writer, header_cache, chunks, total):
+    """The served prefix of ``total`` tokens (``prefix_from_cache``'s dict) from the header's
+    cache and the document's translated layer inputs, written layer by layer: attention
+    layers through ``HybridWriter._layer_kv`` (K/V projections, norms, RoPE; no q / o
+    projections), sliding-window layers only for the chunks their last window reaches, and
+    each gated-delta layer through its own module (which updates the cache's conv and
+    recurrent states). ``chunks`` yields ``(first, last, positions, hidden)`` in order:
+    prefix token indices ``[first, last)`` (the header's come before the first chunk), their
+    positions and ``hidden`` ``[last - first, layers, width]`` (the translator head's output
+    for ``write_prefix``'s chunks).
+
+    The same projections, norms, RoPE, chunks and gated-delta calls as ``write_prefix``, so
+    the result is bitwise equal; it skips the q / o projections and attention of every
+    layer, the sliding-window layers' K/V outside their window and the HF cache's growth by
+    concatenation."""
+
+    from speculative_encoding.translator.hf import copy_cache
+
+    interface = writer.interface
+    dtype = interface.dtype
+    cache = copy_cache(header_cache)
+    full = {}
+    sliding_from = total - writer.window if writer.window else 0
+    for first, last, positions, hidden in chunks:
+        for index, kind in writer.kinds.items():
+            if kind == "sliding" and last <= sliding_from:
+                continue  # out of the final window: vLLM keeps none of it
+            x = writer.norms[index](hidden[:, index].to(dtype).unsqueeze(0))
+            if kind == "linear":
+                writer.modules[index](x, **writer.linear_kwargs(cache))
+                continue
+            keys, values = writer._layer_kv(index, x, positions)
+            if kind == "full":
+                kv = full.get(index)
+                if kv is None:  # [2, total, kv_heads, head_dim], the header's K/V first
+                    layer = header_cache.layers[index]
+                    kv = full[index] = keys.new_empty((2, total, *keys.shape[1:]))
+                    kv[0, :first] = layer.keys[0].transpose(0, 1)
+                    kv[1, :first] = layer.values[0].transpose(0, 1)
+                kv[0, first:last] = keys
+                kv[1, first:last] = values
+            else:  # the HF cache layer keeps exactly its window, as write_prefix's does
+                cache.update(keys.transpose(0, 1)[None], values.transpose(0, 1)[None], index)
+        del hidden
+    out = prefix_from_cache(interface, cache, total)
+    for index, kv in full.items():
+        out["kv"][index], out["kv_first"][index] = kv, 0
+    return out
 
 
 def prefix_from_cache(interface, cache, total):

@@ -250,10 +250,11 @@ class SpeculativeEncoder:
 
         key, target = self.target_key, self.target
         if target is None:
-            self.reader = self.writer = self.engine = None
+            self.reader = self.writer = self.engine = self._fast_writer = None
         else:
             self.hybrid = not target.all_full_attention
             self.writer = E.HybridWriter(target, self.device) if self.hybrid else None
+            self._fast_writer = None
             spec = CATALOG.get(key)  # None: an injected, non-catalog model
             options = (
                 E.engine_options(target, target, key, key).get("target", {})
@@ -491,15 +492,32 @@ class SpeculativeEncoder:
         header_cache = target.native_prefix(torch.tensor(header, device=device))
         doc_ids = torch.tensor(sample.target.doc_ids, device=device)
         head, cache = self.translator.head(self.target_key), header_cache
-        for first in range(0, states.shape[0], self.write_chunk):
-            last = min(states.shape[0], first + self.write_chunk)
-            with settings.autocast(device):
-                hidden = head(states[first:last])
-            positions = doc.target_positions[first:last].to(device)
-            cache, _ = target.write_prefix(doc_ids[first:last], hidden.to(target.dtype), cache,
-                                           positions)
-            del hidden
-        full = E.prefix_from_cache(target, cache, len(header) + states.shape[0])
+        total = len(header) + states.shape[0]
+
+        def chunks():
+            for first in range(0, states.shape[0], self.write_chunk):
+                last = min(states.shape[0], first + self.write_chunk)
+                with settings.autocast(device):
+                    hidden = head(states[first:last])
+                yield first, last, doc.target_positions[first:last].to(device), hidden
+
+        if not ratios and settings.current().fast_writer and E.fast_writer_supported(target):
+            # Only the served prefix is needed (compressors read the HF cache): K/V and
+            # gated-delta states written directly, bitwise equal to write_prefix's.
+            if self._fast_writer is None:
+                self._fast_writer = self.writer or E.HybridWriter(target, device)
+            full = E.write_prefix_fast(
+                self._fast_writer, header_cache,
+                ((len(header) + first, len(header) + last, positions, hidden.to(target.dtype))
+                 for first, last, positions, hidden in chunks()),
+                total)
+            cache = None
+        else:
+            for first, last, positions, hidden in chunks():
+                cache, _ = target.write_prefix(doc_ids[first:last], hidden.to(target.dtype),
+                                               cache, positions)
+                del hidden
+            full = E.prefix_from_cache(target, cache, total)
         doc_states = full if self.hybrid else None
         if self.hybrid:
             full_prefix = full

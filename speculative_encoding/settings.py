@@ -46,6 +46,10 @@ class Settings:
     cache_tolerance: float = 2e-2  # UT_BF16_CACHE_TOLERANCE
     # vLLM connector with tensor parallelism > 1: folder the workers load each prefix from.
     vllm_export_dir: str | None = None  # PMT_VLLM_EXPORT_DIR
+    # SpeculativeEncoder.encode without compressors: write the full prefix with
+    # encode.write_prefix_fast (bitwise equal, much faster) instead of write_prefix, for the
+    # targets in encode.FAST_WRITER_MODEL_TYPES.
+    fast_writer: bool = True  # PMT_FAST_WRITER=0: always write_prefix
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":
@@ -59,6 +63,7 @@ class Settings:
             gdn_full_module=env.get("PMT_GDN_FULL_MODULE") == "1",
             cache_tolerance=float(env.get("UT_BF16_CACHE_TOLERANCE", "2e-2")),
             vllm_export_dir=env.get("PMT_VLLM_EXPORT_DIR"),
+            fast_writer=env.get("PMT_FAST_WRITER", "1") != "0",
         )
 
 
