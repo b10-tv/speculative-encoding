@@ -52,7 +52,8 @@ class Encoded:
 
     target: str
     arm: str  # "full", or "c16" / "c64" / "c128"
-    # CPU tensor [layers, 2, tokens, kv_heads, head_dim], or a dict for hybrid targets
+    # tensor [layers, 2, tokens, kv_heads, head_dim], or a dict for hybrid targets; on the CPU,
+    # or on the encoder's device with settings.prefix_device "device"
     prefix: Any
     # header + document ids (full), or header + kept slot ids (compressed)
     prefix_ids: list[int]
@@ -509,7 +510,7 @@ class SpeculativeEncoder:
                       doc_tokens=len(sample.target.doc_ids), engine=self.engine)
         meta = {"source": self.source_key, "source_doc_tokens": len(sample.source.doc_ids)}
         result = EncodedDocument(Encoded(
-            arm="full", prefix=E.prefix_to(full_prefix, "cpu"),
+            arm="full", prefix=self._served(full_prefix),
             prefix_ids=header + list(sample.target.doc_ids), questions=list(questions),
             meta=meta, **common))
         # Character spans of the target document tokens, in the caller's string (the
@@ -543,13 +544,29 @@ class SpeculativeEncoder:
                         item_meta["selection_top"] = {"positions": top.indices.tolist(),
                                                       "scores": top.values.tolist()}
                 result.compressed[(question["row_id"], ratio)] = Encoded(
-                    arm=f"c{ratio:g}", prefix=E.prefix_to(prefix, "cpu"), questions=[question],
+                    arm=f"c{ratio:g}", prefix=self._served(prefix), questions=[question],
                     prefix_ids=header + [int(sample.target.doc_ids[i]) for i in kept],
                     meta=item_meta, **common)
                 del prefix
         del states, cache, header_cache, doc, full, doc_states, full_prefix
         settings.empty_cache(device)
         return result
+
+    def _served(self, prefix):
+        """A served prefix where ``settings.prefix_device`` puts it."""
+
+        where = settings.current().prefix_device
+        if where not in settings.PREFIX_DEVICES:
+            raise ValueError(f"prefix_device must be one of {settings.PREFIX_DEVICES}, "
+                             f"not {where!r}")
+        if where == "device":
+            # Done before returning: a consumer on another stream (the vLLM connector) reads it.
+            if self.device.type == "cuda":
+                torch.cuda.current_stream(self.device).synchronize()
+            else:
+                settings.synchronize(self.device)
+            return prefix
+        return E.prefix_offload(prefix, pinned=where == "pinned")
 
     def answer_hf(self, encoded: Encoded, questions=None, *, native: bool = False,
                   **kwargs) -> list[dict]:
